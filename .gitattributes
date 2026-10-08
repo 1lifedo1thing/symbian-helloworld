@@ -1,0 +1,2 @@
+# The build runs on Linux; keep every text file line-ending stable.
+* text=auto eol=lf

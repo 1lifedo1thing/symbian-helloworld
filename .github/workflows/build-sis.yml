@@ -1,0 +1,146 @@
+name: Build Symbian SIS
+
+# Builds the Hello World application with the Symbian platform SDK
+# (https://github.com/hpnkv/symbian-platform) and publishes an installable
+# .sis package.
+#
+# The SDK ships prebuilt ARMv5T/ARMv6 EKA2 libraries, an ARM Clang/LLD
+# toolchain and resource tools in a relocatable "native SDK" archive, so the
+# runner only needs Python 3.11-3.14 and a Linux host with glibc 2.39+
+# (ubuntu-24.04).
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # Version of both the symbian-platform Python tools and the native SDK
+  # archive. Keep them equal: the SDK manifest and the CLI must agree.
+  SDK_VERSION: "0.2.0"
+  # Application name and experimental UID3. Both must match app/symbian.toml.
+  APP_NAME: helloworld
+  APP_UID3: "0xE0001001"
+  # ARMv5T runs on every S60 3rd Edition handset (ARM9 and ARM11 alike).
+  # Use armv6 only for targets that are documented to require it.
+  APP_ARCH: armv5t
+
+jobs:
+  build-sis:
+    name: ARM/E32 build and SIS packaging
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Restore the downloaded SDK archive
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/symbian-sdk.tar.gz
+          key: symbian-sdk-${{ env.SDK_VERSION }}-linux-x86_64
+
+      - name: Download the native SDK archive
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/symbian-sdk.tar.gz"
+          url="https://github.com/hpnkv/symbian-platform/releases/download/v${SDK_VERSION}/symbian-sdk-${SDK_VERSION}-linux-x86_64.tar.gz"
+          if [ ! -s "$archive" ] || ! gzip -t "$archive" 2>/dev/null; then
+            curl -fL --retry 3 --retry-delay 5 -o "$archive" "$url"
+          fi
+          gzip -t "$archive"
+          du -h "$archive"
+
+      - name: Install the host tools and the SDK
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install "symbian-platform==${SDK_VERSION}"
+          symbian sdk install "$HOME/symbian-sdk" --archive "$RUNNER_TEMP/symbian-sdk.tar.gz"
+
+      - name: Create the project from the SDK template
+        run: |
+          set -euo pipefail
+          # `init` writes the SDK-version-correct CMakeLists.txt, CMakePresets
+          # and symbian-project.json, and records the selected SDK.
+          symbian init "$RUNNER_TEMP/project" \
+            --name "$APP_NAME" \
+            --uid3 "$APP_UID3" \
+            --architecture "$APP_ARCH" \
+            --non-interactive \
+            --no-build
+
+      - name: Add the Hello World application
+        run: |
+          set -euo pipefail
+          # Everything tracked under app/ replaces the generated starter, so
+          # extra sources (and an optional CMakeLists.txt override) in that
+          # directory are picked up as well.
+          cp -R app/. "$RUNNER_TEMP/project/"
+
+      - name: Build the ARM/E32 executable
+        run: |
+          set -euo pipefail
+          symbian app build --project "$RUNNER_TEMP/project" --output-format=json \
+            | tee "$RUNNER_TEMP/build-report.json"
+          application=$(python3 -c 'import json,os;print(json.load(open(os.environ["RUNNER_TEMP"]+"/build-report.json"))["result"]["artifact"])')
+          symbian inspect "$application" --format e32 --output-format=json \
+            | tee "$RUNNER_TEMP/e32-report.json"
+
+      - name: Package the SIS
+        run: |
+          set -euo pipefail
+          application=$(python3 -c 'import json,os;print(json.load(open(os.environ["RUNNER_TEMP"]+"/build-report.json"))["result"]["artifact"])')
+          symbian package --project "$RUNNER_TEMP/project" \
+            --artifact "$application" \
+            --output "$RUNNER_TEMP/project/.symbian/package" \
+            --output-format=json | tee "$RUNNER_TEMP/package-report.json"
+
+      - name: Sign the SIS with a local development identity
+        run: |
+          set -euo pipefail
+          package=$(python3 -c 'import json,os;print(json.load(open(os.environ["RUNNER_TEMP"]+"/package-report.json"))["result"]["artifact"])')
+          mkdir -p dist
+          # Self-signed identities do not grant Symbian capabilities; they only
+          # let a handset with a permissive install policy accept the package.
+          symbian signing create --identities "$RUNNER_TEMP/identities" \
+            --identity developer \
+            --common-name "Symbian Hello World"
+          symbian signing sign "$package" \
+            --identities "$RUNNER_TEMP/identities" \
+            --identity developer \
+            --destination "dist/${APP_NAME}-signed.sis" \
+            --output-format=json | tee "$RUNNER_TEMP/sign-report.json"
+          symbian inspect "dist/${APP_NAME}-signed.sis" --format sis \
+            --output-format=json | tee "$RUNNER_TEMP/sis-report.json"
+
+      - name: Publish the build outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-sis
+          if-no-files-found: warn
+          path: |
+            dist/*.sis
+            ${{ runner.temp }}/build-report.json
+            ${{ runner.temp }}/e32-report.json
+            ${{ runner.temp }}/package-report.json
+            ${{ runner.temp }}/sign-report.json
+            ${{ runner.temp }}/sis-report.json
+            ${{ runner.temp }}/project/.symbian/build/${{ env.APP_NAME }}.exe
+            ${{ runner.temp }}/project/.symbian/build/${{ env.APP_NAME }}.elf
+
+      - name: Attach the SIS to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.sis

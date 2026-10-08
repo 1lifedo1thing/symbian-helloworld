@@ -1,0 +1,31 @@
+# Application and package identity for the Symbian SDK.
+#
+# `symbian app build` reads [project] and `symbian package` reads [package];
+# [application] adds the application-menu entry and its icon.
+#
+#   * [project] name   must match the CMake target that the generated
+#                      CMakeLists.txt creates (symbian_add_executable).
+#   * [project] uid3   is the experimental development UID of the executable.
+#   * [package] uid    is the UID of the SIS package itself.
+#   * [package] version is [major, minor, build], 0..32767 each.
+#
+# Replace the 0xe0001001 UID3 with your own value inside the experimental
+# range 0xe0000000..0xefffffff before you publish a release.
+
+[project]
+name = "helloworld"
+kind = "e32-import"
+cmake_preset = "symbian-pic"
+uid3 = 0xe0001001
+
+[package]
+uid = 0xe0001001
+name = "Hello World"
+vendor = "Symbian Hello World"
+executable_name = "helloworld.exe"
+version = [1, 0, 0]
+
+[application]
+caption = "Hello World"
+short_caption = "Hello"
+icon = "icon.svg"
